@@ -24,6 +24,8 @@ function platformLabel(p: JoinerPlatform | null): string {
 interface Bridge {
   start(settings: any): Promise<{ ok: boolean; error?: string }>;
   stop(): Promise<{ ok: boolean }>;
+  loadPresets(): Promise<{ path: string; exists: boolean; error?: string; activePreset: string; presets: Preset[] }>;
+  savePresets(data: { activePreset: string; presets: Preset[] }): Promise<{ ok: boolean; error?: string }>;
   onLog(cb: (text: string) => void): void;
   onStatus(cb: (status: string) => void): void;
   onRunning(cb: (running: boolean) => void): void;
@@ -101,7 +103,7 @@ startBtn.addEventListener('click', async () => {
   const settings = {
     platform,
     link,
-    displayName: input('name').value.trim() || 'Joiner',
+    displayName: input('displayName').value.trim() || 'Joiner',
     socksPort: parseInt(input('socksPort').value, 10) || 1080,
     socksUser: input('socksUser').value,
     socksPass: input('socksPass').value,
@@ -121,4 +123,123 @@ startBtn.addEventListener('click', async () => {
 stopBtn.addEventListener('click', async () => {
   appendLog('\n[ui] stopping joiner...\n');
   await bridge.stop();
+});
+
+// Presets: named snapshots of the whole form, kept by the main process
+// in presets.json next to the executable. Values are stored per element
+// id so presets saved by older builds still load after fields are added
+// or removed.
+type PresetValues = Record<string, string | boolean>;
+
+interface Preset {
+  id: string;
+  name: string;
+  values: PresetValues;
+}
+
+const PRESET_FIELDS = [
+  'link', 'displayName', 'socksPort', 'dns', 'socksUser', 'socksPass',
+  'tunnelMode', 'resources', 'vp8Fps', 'vp8Batch',
+  'noTun', 'dualTrack', 'reliable',
+];
+
+const presetSelect = select('preset');
+const presetNameInput = input('presetName');
+const presetSaveBtn = $('presetSave') as HTMLButtonElement;
+const presetDeleteBtn = $('presetDelete') as HTMLButtonElement;
+const field = (id: string) => document.getElementById(id) as HTMLInputElement | HTMLSelectElement;
+
+let presets: Preset[] = [];
+
+async function persistPresets(): Promise<boolean> {
+  const r = await bridge.savePresets({ activePreset: presetSelect.value, presets });
+  if (!r.ok) appendLog(`[ui] could not write presets file: ${r.error}\n`);
+  return r.ok;
+}
+
+function readFormValues(): PresetValues {
+  const values: PresetValues = {};
+  for (const id of PRESET_FIELDS) {
+    const el = field(id);
+    values[id] = el instanceof HTMLInputElement && el.type === 'checkbox' ? el.checked : el.value;
+  }
+  return values;
+}
+
+function applyFormValues(values: PresetValues) {
+  for (const id of PRESET_FIELDS) {
+    const el = field(id);
+    const value = values[id];
+    if (el instanceof HTMLInputElement && el.type === 'checkbox') {
+      if (typeof value === 'boolean') el.checked = value;
+    } else if (typeof value === 'string') {
+      // Skip select values whose option no longer exists.
+      if (el instanceof HTMLSelectElement && !Array.from(el.options).some((o) => o.value === value)) continue;
+      el.value = value;
+    }
+  }
+  refreshPlatformHint();
+}
+
+function renderPresets(activeId: string) {
+  presetSelect.replaceChildren(
+    new Option('New preset', ''),
+    ...presets.map((p) => new Option(p.name, p.id)),
+  );
+  presetSelect.value = presets.some((p) => p.id === activeId) ? activeId : '';
+  presetDeleteBtn.disabled = !presetSelect.value;
+}
+
+function applySelectedPreset() {
+  const preset = presets.find((p) => p.id === presetSelect.value);
+  presetNameInput.value = preset?.name ?? '';
+  presetDeleteBtn.disabled = !preset;
+  if (preset) applyFormValues(preset.values);
+}
+
+presetSelect.addEventListener('change', () => {
+  applySelectedPreset();
+  persistPresets();
+});
+
+presetSaveBtn.addEventListener('click', async () => {
+  const detected = detectPlatform(linkInput.value.trim());
+  const name = presetNameInput.value.trim()
+    || (detected ? platformLabel(detected) : `Preset ${presets.length + 1}`);
+  let preset = presets.find((p) => p.id === presetSelect.value);
+  if (preset) {
+    preset.name = name;
+    preset.values = readFormValues();
+  } else {
+    preset = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+      name,
+      values: readFormValues(),
+    };
+    presets.push(preset);
+  }
+  presetNameInput.value = name;
+  renderPresets(preset.id);
+  if (await persistPresets()) appendLog(`[ui] saved preset "${name}"\n`);
+});
+
+presetDeleteBtn.addEventListener('click', async () => {
+  const preset = presets.find((p) => p.id === presetSelect.value);
+  if (!preset || !confirm(`Delete preset "${preset.name}"?`)) return;
+  presets = presets.filter((p) => p !== preset);
+  presetNameInput.value = '';
+  renderPresets('');
+  if (await persistPresets()) appendLog(`[ui] deleted preset "${preset.name}"\n`);
+});
+
+// Load presets and restore the one that was active when the app was
+// last closed. Nothing is written until the user changes something.
+bridge.loadPresets().then((loaded) => {
+  appendLog(`[ui] presets file: ${loaded.path}\n`);
+  if (loaded.error) {
+    appendLog(`[ui] presets file is not valid JSON (${loaded.error}); saving a preset will overwrite it\n`);
+  }
+  presets = loaded.presets;
+  renderPresets(loaded.activePreset);
+  applySelectedPreset();
 });

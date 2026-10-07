@@ -1,8 +1,8 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { spawn, ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
-import { IPC, JoinerSettings } from '../constants';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { IPC, JoinerSettings, PresetsFile, PresetsLoadResult } from '../constants';
 
 // Single global joiner process. We never run two tunnels at once: the
 // wintun adapter and the route table are exclusive resources.
@@ -59,6 +59,24 @@ function resolveJoinerExe(): string {
   return join(baseDir, `desktop-joiner-${platTag}-${archTag}${suffix}`);
 }
 
+// Presets live in a JSON file next to the executable so they move
+// together with a portable install.
+function resolvePresetsPath(): string {
+  const fileName = 'presets.json';
+  // The portable Windows exe unpacks itself to a temp dir before
+  // running; electron-builder passes the folder holding the real .exe.
+  const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+  if (portableDir) return join(portableDir, fileName);
+  // An AppImage runs from a read-only mount.
+  const appImage = process.env.APPIMAGE;
+  if (appImage) return join(dirname(appImage), fileName);
+  // Dev runs and macOS app bundles keep presets in userData.
+  if (!app.isPackaged || process.platform === 'darwin') {
+    return join(app.getPath('userData'), fileName);
+  }
+  return join(dirname(process.execPath), fileName);
+}
+
 function send(channel: string, payload: unknown) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(channel, payload);
@@ -68,7 +86,7 @@ function send(channel: string, payload: unknown) {
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 900,
-    height: 600,
+    height: 700,
     title: 'WhitelistBypass Joiner',
     icon: join(__dirname, '..', '..', 'resources', 'icon.png'),
     webPreferences: {
@@ -197,6 +215,29 @@ ipcMain.handle(IPC.START, async (_e, settings: JoinerSettings) => {
   lastSettings = settings;
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
   return spawnJoiner(settings);
+});
+
+ipcMain.handle(IPC.PRESETS_LOAD, async (): Promise<PresetsLoadResult> => {
+  const path = resolvePresetsPath();
+  const result: PresetsLoadResult = { path, exists: existsSync(path), activePreset: '', presets: [] };
+  if (!result.exists) return result;
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    result.presets = Array.isArray(parsed?.presets) ? parsed.presets : [];
+    result.activePreset = typeof parsed?.activePreset === 'string' ? parsed.activePreset : '';
+  } catch (err) {
+    result.error = (err as Error).message;
+  }
+  return result;
+});
+
+ipcMain.handle(IPC.PRESETS_SAVE, async (_e, data: PresetsFile) => {
+  try {
+    writeFileSync(resolvePresetsPath(), JSON.stringify(data, null, 2) + '\n');
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: (err as Error).message };
+  }
 });
 
 ipcMain.handle(IPC.STOP, async () => {

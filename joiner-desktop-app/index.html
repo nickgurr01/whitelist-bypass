@@ -13,6 +13,15 @@
     </header>
     <main>
       <section class="form">
+        <div class="field presets">
+          Preset
+          <div class="preset-bar">
+            <select id="preset"></select>
+            <input id="presetName" type="text" placeholder="Preset name" />
+            <button id="presetSave" class="secondary">Save</button>
+            <button id="presetDelete" class="secondary">Delete</button>
+          </div>
+        </div>
         <label>
           Join link
           <input id="link" type="text" placeholder="Paste call link" />
@@ -20,7 +29,7 @@
         </label>
         <label>
           Display name
-          <input id="name" type="text" value="Joiner" />
+          <input id="displayName" type="text" value="Joiner" />
         </label>
         <div class="row">
           <label>

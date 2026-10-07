@@ -4,6 +4,8 @@ export const IPC = {
   LOG: 'joiner:log',
   STATUS: 'joiner:status',
   RUNNING: 'joiner:running',
+  PRESETS_LOAD: 'presets:load',
+  PRESETS_SAVE: 'presets:save',
 } as const;
 
 export type JoinerPlatform = 'wbstream' | 'telemost' | 'vk' | 'dion' | 'bitrix';
@@ -23,4 +25,21 @@ export interface JoinerSettings {
   noTun: boolean;
   dualTrack: boolean;
   reliable: boolean;
+}
+
+export interface JoinerPreset {
+  id: string;
+  name: string;
+  values: Record<string, string | boolean>;
+}
+
+export interface PresetsFile {
+  activePreset: string;
+  presets: JoinerPreset[];
+}
+
+export interface PresetsLoadResult extends PresetsFile {
+  path: string;
+  exists: boolean;
+  error?: string;
 }
