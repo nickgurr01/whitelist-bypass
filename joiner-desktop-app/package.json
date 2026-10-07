@@ -41,6 +41,9 @@
         }
       ]
     },
+    "portable": {
+      "requestExecutionLevel": "admin"
+    },
     "linux": {
       "target": "AppImage",
       "artifactName": "${productName}-${version}-${arch}.${ext}",
