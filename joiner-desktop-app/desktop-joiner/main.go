@@ -97,7 +97,7 @@ const (
 
 func main() {
 	platform := flag.String("platform", "", "wbstream | telemost | vk | dion | bitrix (required)")
-	link := flag.String("link", "", "WB Stream room link, Telemost join URI, VK call link, or DION event link (required)")
+	link := flag.String("link", "", "WB Stream room link, Telemost join URI, VK call link, DION event link, or Bitrix24 /video/ link (required)")
 	displayName := flag.String("name", "Joiner", "display name in the room")
 	socksHost := flag.String("socks-host", common.SocksLocalhostIP, "SOCKS5 listen address (use 0.0.0.0 to expose on LAN; tun2socks always connects via loopback)")
 	socksPort := flag.Int("socks-port", 1080, "local SOCKS5 port")
@@ -387,6 +387,12 @@ func signalingHosts(platform, link string) []string {
 		return hosts
 	case "dion", "dn":
 		return []string{"dion.vc", "api.dion.vc", "api-clients.dion.vc"}
+	case "bitrix", "bx":
+		// The media server and pull hosts come from the portal API and
+		// are bypassed through the resolve hook in runBitrix
+		if u, err := url.Parse(strings.TrimSpace(link)); err == nil && u.Host != "" {
+			return []string{u.Host}
+		}
 	}
 	return nil
 }

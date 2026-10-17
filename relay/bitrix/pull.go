@@ -1,9 +1,11 @@
 package bitrix
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,10 +26,11 @@ const (
 )
 
 type PullClient struct {
-	cfg    PullConfigResult
-	ua     string
-	origin string
-	logFn  func(string, ...any)
+	cfg         PullConfigResult
+	ua          string
+	origin      string
+	logFn       func(string, ...any)
+	dialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	mu     sync.Mutex
 	ws     *websocket.Conn
@@ -44,6 +47,12 @@ func NewPullClient(cfg PullConfigResult, ua, origin string, logFn func(string, .
 func (p *PullClient) SetOnUsersAnswered(fn func([]string)) { p.onUsersAnswered = fn }
 
 func (p *PullClient) SetOnUserLeave(fn func(string)) { p.onUserLeave = fn }
+
+// SetDialContext routes the subws2 dial through a custom dialer, so joiners
+// that bypass their own TUN for signaling hosts also cover the pull host
+func (p *PullClient) SetDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) {
+	p.dialContext = fn
+}
 
 func (p *PullClient) dialURL() string {
 	q := url.Values{}
@@ -70,7 +79,7 @@ func (p *PullClient) connect() error {
 	if p.origin != "" {
 		headers.Set("Origin", p.origin)
 	}
-	dialer := headless.ChromeWindows.WebSocketDialer(headless.TLSOptions{})
+	dialer := headless.ChromeWindows.WebSocketDialer(headless.TLSOptions{DialContext: p.dialContext})
 	conn, resp, err := dialer.Dial(p.dialURL(), headers)
 	if err != nil {
 		if resp != nil {
