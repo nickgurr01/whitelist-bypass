@@ -173,6 +173,9 @@ class ProxyManager: ObservableObject {
 
     @Published var callUrl: String = AppDefaults.lastUrl { didSet { AppDefaults.lastUrl = callUrl } }
     @Published var socksPort: Int = AppDefaults.socksPort { didSet { AppDefaults.socksPort = socksPort } }
+    @Published var autoPort: Bool = AppDefaults.autoPort { didSet { AppDefaults.autoPort = autoPort } }
+    // Port the running session is bound to, differs from socksPort only after an auto-pick fallback
+    @Published private(set) var activeSocksPort: Int = AppDefaults.socksPort
     @Published var tunnelMode: TunnelMode = AppDefaults.tunnelMode { didSet { AppDefaults.tunnelMode = tunnelMode } }
     @Published var displayName: String = AppDefaults.displayName { didSet { AppDefaults.displayName = displayName } }
     @Published var showLogs: Bool = AppDefaults.showLogs { didSet { AppDefaults.showLogs = showLogs } }
@@ -208,19 +211,24 @@ class ProxyManager: ObservableObject {
     }
 
     var socksUrl: String {
-        "socks5://\(activeSocksUser):\(activeSocksPass)@127.0.0.1:\(socksPort)"
+        "socks5://\(activeSocksUser):\(activeSocksPass)@127.0.0.1:\(activeSocksPort)"
     }
 
+    // Mirrors the Go listener: 127.0.0.1 with SO_REUSEADDR, so a port left in
+    // TIME_WAIT by the previous session is not reported as busy
     private func isPortAvailable(_ port: Int) -> Bool {
         let socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
         if socketFD == -1 { return false }
         defer { close(socketFD) }
 
+        var reuse: Int32 = 1
+        setsockopt(socketFD, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
         var addr = sockaddr_in()
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = in_port_t(port).bigEndian
-        addr.sin_addr.s_addr = INADDR_ANY
+        addr.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
 
         let result = withUnsafePointer(to: &addr) { addrPtr in
             addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
@@ -230,69 +238,107 @@ class ProxyManager: ObservableObject {
         return result == 0
     }
 
+    private func ephemeralPort() -> Int? {
+        let socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
+        if socketFD == -1 { return nil }
+        defer { close(socketFD) }
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
+        let bound = withUnsafePointer(to: &addr) { addrPtr in
+            addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                bind(socketFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if bound != 0 { return nil }
+
+        var boundAddr = sockaddr_in()
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &boundAddr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
+                getsockname(socketFD, sockPtr, &addrLen)
+            }
+        }
+        if named != 0 { return nil }
+        return Int(UInt16(bigEndian: boundAddr.sin_port))
+    }
+
+    // The configured port is used as is unless auto-pick is on, the Go side
+    // binds it on start and reports failure, so a busy port never silently moves
+    private func pickSocksPort() -> Int {
+        let preferred = AppDefaults.socksPortRange.contains(socksPort) ? socksPort : AppDefaults.defaultSocksPort
+        if !autoPort || isPortAvailable(preferred) { return preferred }
+
+        let upper = min(preferred + 100, AppDefaults.socksPortRange.upperBound)
+        guard let fallback = (preferred...upper).first(where: { isPortAvailable($0) }) ?? ephemeralPort() else {
+            return preferred
+        }
+        appendLog("Port \(preferred) busy, using \(fallback)")
+        return fallback
+    }
+
+    private func joinParams(for platform: CallPlatform) -> [String: Any]? {
+        switch platform {
+        case .telemost:
+            return [
+                "joinLink": callUrl,
+                "displayName": displayName,
+                "vp8Fps": vp8Fps,
+                "vp8Batch": vp8Batch,
+                "dualTrack": dualTrack,
+                "reliable": reliable,
+            ]
+        case .vk:
+            return nil
+        case .wbstream:
+            return [
+                "roomId": CallPlatform.extractRoomId(url: callUrl),
+                "displayName": displayName,
+                "tunnelMode": tunnelMode.rawValue,
+                "vp8Fps": vp8Fps,
+                "vp8Batch": vp8Batch,
+                "dualTrack": dualTrack,
+                "reliable": reliable,
+            ]
+        case .dion:
+            return [
+                "roomId": CallPlatform.extractRoomId(url: callUrl),
+                "displayName": displayName,
+                "vp8Fps": vp8Fps,
+                "vp8Batch": vp8Batch,
+            ]
+        case .bitrix:
+            return [
+                "joinLink": callUrl,
+                "displayName": displayName,
+                "tunnelMode": tunnelMode.rawValue,
+                "vp8Fps": vp8Fps,
+                "vp8Batch": vp8Batch,
+                "dualTrack": dualTrack,
+                "reliable": reliable,
+            ]
+        }
+    }
+
     func connect() {
         guard !callUrl.isEmpty else { return }
-
-        if !isPortAvailable(socksPort) {
-            let originalPort = socksPort
-            let ranges: [ClosedRange<Int>] = [
-                originalPort...min(originalPort + 100, 65535),
-                1080...1380,
-                8080...8380,
-                9080...9380,
-                49152...65535
-            ]
-            var foundPort = false
-            for range in ranges {
-                for candidatePort in range {
-                    if isPortAvailable(candidatePort) {
-                        socksPort = candidatePort
-                        foundPort = true
-                        break
-                    }
-                }
-                if foundPort { break }
-            }
-            if !foundPort {
-                let socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP)
-                if socketFD != -1 {
-                    var addr = sockaddr_in()
-                    addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-                    addr.sin_family = sa_family_t(AF_INET)
-                    addr.sin_port = 0
-                    addr.sin_addr.s_addr = in_addr_t(INADDR_LOOPBACK).bigEndian
-                    let bound = withUnsafePointer(to: &addr) { addrPtr in
-                        addrPtr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                            bind(socketFD, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
-                        }
-                    }
-                    if bound == 0 {
-                        var boundAddr = sockaddr_in()
-                        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
-                        withUnsafeMutablePointer(to: &boundAddr) { ptr in
-                            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                                getsockname(socketFD, sockPtr, &addrLen)
-                            }
-                        }
-                        socksPort = Int(UInt16(bigEndian: boundAddr.sin_port))
-                    }
-                    close(socketFD)
-                }
-            }
-            appendLog("Port \(originalPort) busy, using \(socksPort)")
-        }
 
         logs.removeAll()
         pendingLogs.removeAll()
         errorMessage = ""
         status = .idle
+
+        let port = pickSocksPort()
+        activeSocksPort = port
         isRunning = true
 
         let bridge = HeadlessCallbackBridge()
         bridge.manager = self
         callbackBridge = bridge
 
-        backgroundKeepAlive.start()
         detectedPlatform = CallPlatform.detect(url: callUrl)
         appendLog("Platform: \(detectedPlatform.rawValue)")
 
@@ -305,77 +351,47 @@ class ProxyManager: ObservableObject {
 
         switch detectedPlatform {
         case .telemost:
-            IosStartTelemostHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
-            appendLog("Started Telemost headless joiner")
-            let joinParams: [String: Any] = [
-                "joinLink": callUrl,
-                "displayName": displayName,
-                "vp8Fps": vp8Fps,
-                "vp8Batch": vp8Batch,
-                "dualTrack": dualTrack,
-                "reliable": reliable,
-            ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                IosSendJoinParams(jsonString)
-                appendLog("Sent join params")
-            }
-
+            IosStartTelemostHeadless(port, activeSocksUser, activeSocksPass, bridge)
         case .vk:
-            IosStartVKHeadless(socksPort, activeSocksUser, activeSocksPass, callUrl, displayName, tunnelMode.rawValue, vp8Fps, vp8Batch, dualTrack, bridge)
-            appendLog("Started VK headless joiner")
-
+            IosStartVKHeadless(port, activeSocksUser, activeSocksPass, callUrl, displayName, tunnelMode.rawValue, vp8Fps, vp8Batch, dualTrack, bridge)
         case .wbstream:
-            IosStartWBStreamHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
-            appendLog("Started WB Stream headless joiner")
-            let joinParams: [String: Any] = [
-                "roomId": CallPlatform.extractRoomId(url: callUrl),
-                "displayName": displayName,
-                "tunnelMode": tunnelMode.rawValue,
-                "vp8Fps": vp8Fps,
-                "vp8Batch": vp8Batch,
-                "dualTrack": dualTrack,
-                "reliable": reliable,
-            ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                IosSendJoinParams(jsonString)
-                appendLog("Sent join params")
-            }
-
+            IosStartWBStreamHeadless(port, activeSocksUser, activeSocksPass, bridge)
         case .dion:
-            IosStartDionHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
-            appendLog("Started DION headless joiner")
-            let joinParams: [String: Any] = [
-                "roomId": CallPlatform.extractRoomId(url: callUrl),
-                "displayName": displayName,
-                "vp8Fps": vp8Fps,
-                "vp8Batch": vp8Batch,
-            ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                IosSendJoinParams(jsonString)
-                appendLog("Sent join params")
-            }
-
+            IosStartDionHeadless(port, activeSocksUser, activeSocksPass, bridge)
         case .bitrix:
-            IosStartBitrixHeadless(socksPort, activeSocksUser, activeSocksPass, bridge)
-            appendLog("Started Bitrix headless joiner")
-            let joinParams: [String: Any] = [
-                "joinLink": callUrl,
-                "displayName": displayName,
-                "tunnelMode": tunnelMode.rawValue,
-                "vp8Fps": vp8Fps,
-                "vp8Batch": vp8Batch,
-                "dualTrack": dualTrack,
-                "reliable": reliable,
-            ]
-            if let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
-               let jsonString = String(data: jsonData, encoding: .utf8) {
-                IosSendJoinParams(jsonString)
-                appendLog("Sent join params")
-            }
+            IosStartBitrixHeadless(port, activeSocksUser, activeSocksPass, bridge)
         }
+
+        // Start binds the SOCKS port synchronously, anything but our port means it failed
+        let boundPort = IosSocksPort()
+        guard boundPort == port else {
+            failStart(port: port)
+            return
+        }
+        appendLog("SOCKS5 port \(boundPort) applied")
+        appendLog("Started \(detectedPlatform.rawValue) headless joiner")
+        backgroundKeepAlive.start()
+
+        if let joinParams = joinParams(for: detectedPlatform),
+           let jsonData = try? JSONSerialization.data(withJSONObject: joinParams),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            IosSendJoinParams(jsonString)
+            appendLog("Sent join params")
+        }
+    }
+
+    // Go has already queued an ERROR status with the bind error, which
+    // replaces errorMessage once delivered; this only tears down and hints
+    private func failStart(port: Int) {
+        IosStopHeadless()
+        callbackBridge?.manager = nil
+        callbackBridge = nil
+        isRunning = false
+        status = .error
+        let hint = String(format: NSLocalizedString("error_port_unavailable", comment: ""), port)
+        errorMessage = hint
+        appendLog(hint)
+        showToast(hint)
     }
 
     func disconnect() {
@@ -396,7 +412,6 @@ class ProxyManager: ObservableObject {
         logs.removeAll()
         pendingLogs.removeAll()
         errorMessage = ""
-        socksPort = 1080
     }
 
     @Published var captchaURL: String?
@@ -460,7 +475,7 @@ class ProxyManager: ObservableObject {
     }
 
     func openTelegramProxy() {
-        let urlString = "tg://socks?server=127.0.0.1&port=\(socksPort)&user=\(activeSocksUser)&pass=\(activeSocksPass)"
+        let urlString = "tg://socks?server=127.0.0.1&port=\(activeSocksPort)&user=\(activeSocksUser)&pass=\(activeSocksPass)"
         if let url = URL(string: urlString) {
             UIApplication.shared.open(url)
         }
@@ -469,7 +484,7 @@ class ProxyManager: ObservableObject {
     func openHappProxy() {
         let creds = "\(activeSocksUser):\(activeSocksPass)"
         let credsB64 = Data(creds.utf8).base64EncodedString()
-        let proxyUri = "socks://\(credsB64)@127.0.0.1:\(socksPort)#WLB-\(socksPort)"
+        let proxyUri = "socks://\(credsB64)@127.0.0.1:\(activeSocksPort)#WLB-\(activeSocksPort)"
         UIPasteboard.general.string = proxyUri
         showToast(NSLocalizedString("toast_happ_params_copied", comment: ""))
     }

@@ -3,6 +3,7 @@ package ios
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"sync"
 
 	"whitelist-bypass/relay/common"
@@ -27,11 +28,13 @@ type joinerHandle interface {
 
 var activeHeadless struct {
 	sync.Mutex
-	joiner   joinerHandle
-	callback HeadlessCallback
-	bridge   *tunnel.RelayBridge
-	stopped  bool
-	platform string
+	joiner    joinerHandle
+	callback  HeadlessCallback
+	bridge    *tunnel.RelayBridge
+	socksLn   net.Listener
+	socksPort int
+	stopped   bool
+	platform  string
 }
 
 type iosStatusEmitter struct {
@@ -48,7 +51,7 @@ type iosCacheStore struct {
 func (c *iosCacheStore) Save(key string, value string) { c.callback.SaveCache(key, value) }
 func (c *iosCacheStore) Load(key string) string        { return c.callback.LoadCache(key) }
 
-func makeOnConnected(socksPort int, socksUser, socksPass string, logFn func(string, ...any), callback HeadlessCallback, onConfigAck func()) func(tunnel.DataTunnel) {
+func makeOnConnected(socksUser, socksPass string, logFn func(string, ...any), callback HeadlessCallback, onConfigAck func()) func(tunnel.DataTunnel) {
 	return func(tun tunnel.DataTunnel) {
 		activeHeadless.Lock()
 		if activeHeadless.stopped {
@@ -86,17 +89,56 @@ func makeOnConnected(socksPort int, socksUser, socksPass string, logFn func(stri
 			return
 		}
 		activeHeadless.bridge = bridge
+		ln := activeHeadless.socksLn
+		activeHeadless.socksLn = nil
 		activeHeadless.Unlock()
 
-		socksAddr := fmt.Sprintf("%s:%d", common.SocksLocalhostIP, socksPort)
-		logFn("ios: SOCKS5 proxy starting on %s", socksAddr)
+		if ln == nil {
+			logFn("ios: SOCKS5 listener missing, port was not reserved at start")
+			callback.OnStatus("ERROR:socks listener missing")
+			return
+		}
+		logFn("ios: SOCKS5 proxy starting on %s", ln.Addr())
 		go func() {
-			if err := bridge.ListenSOCKS(socksAddr); err != nil {
+			if err := bridge.ServeSOCKS(ln); err != nil {
 				logFn("ios: SOCKS5 listen error: %v", err)
 				callback.OnStatus("ERROR:socks listen: " + err.Error())
 			}
 		}()
 	}
+}
+
+// beginHeadless tears down the previous session and binds the SOCKS5 port
+// right away, so a taken port fails the start instead of surfacing only
+// after the tunnel connects. The listener is handed to the bridge later
+func beginHeadless(platform string, socksPort int, callback HeadlessCallback) bool {
+	StopHeadless()
+
+	socksAddr := fmt.Sprintf("%s:%d", common.SocksLocalhostIP, socksPort)
+	ln, err := net.Listen("tcp", socksAddr)
+	if err != nil {
+		callback.OnLog(fmt.Sprintf("ios: SOCKS5 port %d unavailable: %v", socksPort, err))
+		callback.OnStatus(fmt.Sprintf("ERROR:socks port %d unavailable: %v", socksPort, err))
+		return false
+	}
+	callback.OnLog(fmt.Sprintf("ios: SOCKS5 port reserved on %s", socksAddr))
+
+	activeHeadless.Lock()
+	activeHeadless.callback = callback
+	activeHeadless.stopped = false
+	activeHeadless.platform = platform
+	activeHeadless.socksLn = ln
+	activeHeadless.socksPort = socksPort
+	activeHeadless.Unlock()
+	return true
+}
+
+// SocksPort returns the SOCKS5 port held by the current session, 0 when
+// the last start failed to bind it or nothing is running
+func SocksPort() int {
+	activeHeadless.Lock()
+	defer activeHeadless.Unlock()
+	return activeHeadless.socksPort
 }
 
 func makeHelpers(callback HeadlessCallback) (func(string, ...any), joiner.ResolveFunc, *iosStatusEmitter) {
@@ -122,17 +164,13 @@ func makeHelpers(callback HeadlessCallback) (func(string, ...any), joiner.Resolv
 func SetDebug(enabled bool) { common.Debug = enabled }
 
 func StartWBStreamHeadless(socksPort int, socksUser, socksPass string, callback HeadlessCallback) {
-	StopHeadless()
-
-	activeHeadless.Lock()
-	activeHeadless.callback = callback
-	activeHeadless.stopped = false
-	activeHeadless.platform = "wbstream"
-	activeHeadless.Unlock()
+	if !beginHeadless("wbstream", socksPort, callback) {
+		return
+	}
 
 	logFn, resolveFn, statusEmitter := makeHelpers(callback)
 	wbJoiner := joiner.NewWBStreamHeadlessJoiner(logFn, resolveFn, statusEmitter, nil)
-	wbJoiner.OnConnected = makeOnConnected(socksPort, socksUser, socksPass, logFn, callback, wbJoiner.MarkConfigAcked)
+	wbJoiner.OnConnected = makeOnConnected(socksUser, socksPass, logFn, callback, wbJoiner.MarkConfigAcked)
 
 	activeHeadless.Lock()
 	activeHeadless.joiner = wbJoiner
@@ -142,17 +180,13 @@ func StartWBStreamHeadless(socksPort int, socksUser, socksPass string, callback 
 }
 
 func StartDionHeadless(socksPort int, socksUser, socksPass string, callback HeadlessCallback) {
-	StopHeadless()
-
-	activeHeadless.Lock()
-	activeHeadless.callback = callback
-	activeHeadless.stopped = false
-	activeHeadless.platform = "dion"
-	activeHeadless.Unlock()
+	if !beginHeadless("dion", socksPort, callback) {
+		return
+	}
 
 	logFn, resolveFn, statusEmitter := makeHelpers(callback)
 	dionJoiner := joiner.NewDionHeadlessJoiner(logFn, resolveFn, statusEmitter, nil)
-	dionJoiner.OnConnected = makeOnConnected(socksPort, socksUser, socksPass, logFn, callback, nil)
+	dionJoiner.OnConnected = makeOnConnected(socksUser, socksPass, logFn, callback, nil)
 
 	activeHeadless.Lock()
 	activeHeadless.joiner = dionJoiner
@@ -162,17 +196,13 @@ func StartDionHeadless(socksPort int, socksUser, socksPass string, callback Head
 }
 
 func StartTelemostHeadless(socksPort int, socksUser, socksPass string, callback HeadlessCallback) {
-	StopHeadless()
-
-	activeHeadless.Lock()
-	activeHeadless.callback = callback
-	activeHeadless.stopped = false
-	activeHeadless.platform = "telemost"
-	activeHeadless.Unlock()
+	if !beginHeadless("telemost", socksPort, callback) {
+		return
+	}
 
 	logFn, resolveFn, statusEmitter := makeHelpers(callback)
 	tmJoiner := joiner.NewTelemostHeadlessJoiner(logFn, resolveFn, statusEmitter, nil, pion.AddTunnelTracks, pion.ReadTrack)
-	tmJoiner.OnConnected = makeOnConnected(socksPort, socksUser, socksPass, logFn, callback, tmJoiner.MarkConfigAcked)
+	tmJoiner.OnConnected = makeOnConnected(socksUser, socksPass, logFn, callback, tmJoiner.MarkConfigAcked)
 
 	activeHeadless.Lock()
 	activeHeadless.joiner = tmJoiner
@@ -182,17 +212,13 @@ func StartTelemostHeadless(socksPort int, socksUser, socksPass string, callback 
 }
 
 func StartBitrixHeadless(socksPort int, socksUser, socksPass string, callback HeadlessCallback) {
-	StopHeadless()
-
-	activeHeadless.Lock()
-	activeHeadless.callback = callback
-	activeHeadless.stopped = false
-	activeHeadless.platform = "bitrix"
-	activeHeadless.Unlock()
+	if !beginHeadless("bitrix", socksPort, callback) {
+		return
+	}
 
 	logFn, resolveFn, statusEmitter := makeHelpers(callback)
 	bxJoiner := joiner.NewBitrixHeadlessJoiner(logFn, resolveFn, statusEmitter, nil)
-	bxJoiner.OnConnected = makeOnConnected(socksPort, socksUser, socksPass, logFn, callback, bxJoiner.MarkConfigAcked)
+	bxJoiner.OnConnected = makeOnConnected(socksUser, socksPass, logFn, callback, bxJoiner.MarkConfigAcked)
 
 	activeHeadless.Lock()
 	activeHeadless.joiner = bxJoiner
@@ -202,17 +228,13 @@ func StartBitrixHeadless(socksPort int, socksUser, socksPass string, callback He
 }
 
 func StartVKHeadless(socksPort int, socksUser, socksPass string, joinLink, displayName, tunnelMode string, vp8Fps, vp8Batch int, dualTrack bool, callback HeadlessCallback) {
-	StopHeadless()
-
-	activeHeadless.Lock()
-	activeHeadless.callback = callback
-	activeHeadless.stopped = false
-	activeHeadless.platform = "vk"
-	activeHeadless.Unlock()
+	if !beginHeadless("vk", socksPort, callback) {
+		return
+	}
 
 	logFn, resolveFn, statusEmitter := makeHelpers(callback)
 	vkJoiner := joiner.NewVKHeadlessJoiner(logFn, resolveFn, statusEmitter, nil, pion.AddTunnelTracks, pion.ReadTrack)
-	vkJoiner.OnConnected = makeOnConnected(socksPort, socksUser, socksPass, logFn, callback, vkJoiner.MarkConfigAcked)
+	vkJoiner.OnConnected = makeOnConnected(socksUser, socksPass, logFn, callback, vkJoiner.MarkConfigAcked)
 
 	activeHeadless.Lock()
 	activeHeadless.joiner = vkJoiner
@@ -287,8 +309,11 @@ func StopHeadless() {
 	activeHeadless.stopped = true
 	currentJoiner := activeHeadless.joiner
 	bridge := activeHeadless.bridge
+	socksLn := activeHeadless.socksLn
 	activeHeadless.joiner = nil
 	activeHeadless.bridge = nil
+	activeHeadless.socksLn = nil
+	activeHeadless.socksPort = 0
 	activeHeadless.callback = nil
 	activeHeadless.platform = ""
 	activeHeadless.Unlock()
@@ -299,5 +324,9 @@ func StopHeadless() {
 	}
 	if bridge != nil {
 		bridge.Close()
+	}
+	// Still set only when the tunnel never connected, the bridge owns it otherwise
+	if socksLn != nil {
+		socksLn.Close()
 	}
 }

@@ -20,6 +20,11 @@
 "settings_tunnel_dc" = "DataChannel";
 "settings_tunnel_video" = "Video (VP8)";
 "settings_proxy" = "Proxy";
+"settings_socks_port" = "Local port";
+"settings_auto_port_title" = "Pick free port if busy";
+"settings_auto_port_sub" = "Off = keep the port fixed and fail to start when it is taken.";
+"settings_port_locked" = "Stop the proxy to change the port.";
+"error_port_unavailable" = "Port %d is unavailable, change it in Settings";
 "settings_auth_mode" = "Auth Mode";
 "settings_auth_auto" = "Auto";
 "settings_auth_manual" = "Manual";

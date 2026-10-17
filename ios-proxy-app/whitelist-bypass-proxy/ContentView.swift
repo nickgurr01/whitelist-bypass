@@ -203,6 +203,34 @@ struct LogView: View {
     }
 }
 
+// Text-backed so every keystroke commits a valid port, numberPad has no return key
+struct SocksPortField: View {
+    @Binding var port: Int
+    @State private var text = ""
+
+    private var isValid: Bool {
+        Int(text).map { AppDefaults.socksPortRange.contains($0) } ?? false
+    }
+
+    var body: some View {
+        HStack {
+            Text(NSLocalizedString("settings_socks_port", comment: ""))
+            Spacer()
+            TextField(String(AppDefaults.defaultSocksPort), text: $text)
+                .keyboardType(.numberPad)
+                .multilineTextAlignment(.trailing)
+                .foregroundColor(isValid ? .primary : .red)
+                .frame(width: 80)
+                .onAppear { text = String(port) }
+                .onChange(of: text) { newValue in
+                    if let value = Int(newValue), AppDefaults.socksPortRange.contains(value) {
+                        port = value
+                    }
+                }
+        }
+    }
+}
+
 struct SettingsView: View {
     @EnvironmentObject var proxyManager: ProxyManager
     @Environment(\.dismiss) var dismiss
@@ -217,7 +245,19 @@ struct SettingsView: View {
                     }
                 }
 
-                Section(NSLocalizedString("settings_proxy", comment: "")) {
+                Section {
+                    SocksPortField(port: $proxyManager.socksPort)
+                        .disabled(proxyManager.isRunning)
+                    Toggle(isOn: $proxyManager.autoPort) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(NSLocalizedString("settings_auto_port_title", comment: ""))
+                            Text(NSLocalizedString("settings_auto_port_sub", comment: ""))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .disabled(proxyManager.isRunning)
+
                     Picker(NSLocalizedString("settings_auth_mode", comment: ""), selection: $proxyManager.socksAuthMode) {
                         Text(NSLocalizedString("settings_auth_auto", comment: "")).tag(SocksAuthMode.auto)
                         Text(NSLocalizedString("settings_auth_manual", comment: "")).tag(SocksAuthMode.manual)
@@ -230,6 +270,12 @@ struct SettingsView: View {
                         TextField(NSLocalizedString("hint_password", comment: ""), text: $proxyManager.manualSocksPass)
                             .autocapitalization(.none)
                             .disableAutocorrection(true)
+                    }
+                } header: {
+                    Text(NSLocalizedString("settings_proxy", comment: ""))
+                } footer: {
+                    if proxyManager.isRunning {
+                        Text(NSLocalizedString("settings_port_locked", comment: ""))
                     }
                 }
 

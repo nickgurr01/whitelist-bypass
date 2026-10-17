@@ -3,6 +3,7 @@ import Foundation
 enum DefaultsKeys {
     static let lastUrl = "lastUrl"
     static let socksPort = "socksPort"
+    static let autoPort = "autoPort"
     static let tunnelMode = "tunnelMode"
     static let displayName = "displayName"
     static let showLogs = "showLogs"
@@ -24,14 +25,22 @@ enum VP8Defaults {
 struct AppDefaults {
     private static let defaults = UserDefaults.standard
 
+    static let defaultSocksPort = 1080
+    static let socksPortRange = 1...65535
+
     static var lastUrl: String {
         get { defaults.string(forKey: DefaultsKeys.lastUrl) ?? "" }
         set { defaults.set(newValue, forKey: DefaultsKeys.lastUrl) }
     }
 
     static var socksPort: Int {
-        get { defaults.object(forKey: DefaultsKeys.socksPort) as? Int ?? 1080 }
+        get { defaults.object(forKey: DefaultsKeys.socksPort) as? Int ?? defaultSocksPort }
         set { defaults.set(newValue, forKey: DefaultsKeys.socksPort) }
+    }
+
+    static var autoPort: Bool {
+        get { defaults.object(forKey: DefaultsKeys.autoPort) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: DefaultsKeys.autoPort) }
     }
 
     static var tunnelMode: TunnelMode {

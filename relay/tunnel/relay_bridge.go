@@ -543,6 +543,12 @@ func (rb *RelayBridge) ListenSOCKS(addr string) error {
 	if err != nil {
 		return err
 	}
+	return rb.ServeSOCKS(ln)
+}
+
+// ServeSOCKS accepts SOCKS5 clients on an already bound listener and
+// takes ownership of it: the listener is closed together with the bridge
+func (rb *RelayBridge) ServeSOCKS(ln net.Listener) error {
 	rb.listenerMu.Lock()
 	if rb.closed.Load() {
 		rb.listenerMu.Unlock()
@@ -551,7 +557,7 @@ func (rb *RelayBridge) ListenSOCKS(addr string) error {
 	}
 	rb.listener = ln
 	rb.listenerMu.Unlock()
-	rb.logFn("relay: SOCKS5 on %s", addr)
+	rb.logFn("relay: SOCKS5 on %s", ln.Addr())
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
