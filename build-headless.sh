@@ -1,5 +1,10 @@
 #!/bin/sh
 set -e
+
+# Go 1.27+ selects a headless-client HTTP/2 path that panics on the first
+# HTTPS request; pin the version docker-build uses, override via env
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.1}"
+
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 echo "Building headless-vk-creator..."

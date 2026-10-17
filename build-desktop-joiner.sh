@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Go 1.27+ selects a headless-client HTTP/2 path that panics on the first
+# HTTPS request; pin the version docker-build uses, override via env
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.1}"
+
 # Builds the desktop-joiner Go binary for Windows and Linux, plus
 # fetches wintun.dll for Windows. Output lives next to the Go source
 # in joiner-desktop-app/desktop-joiner/. Nothing is written to

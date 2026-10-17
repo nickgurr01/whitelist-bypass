@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Go 1.27+ selects a headless-client HTTP/2 path that panics on the first
+# HTTPS request; pin the version docker-build uses, override via env
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.1}"
+
 export PATH="$PATH:/opt/homebrew/bin:$HOME/go/bin"
 
 command -v go >/dev/null || { echo "go not found"; exit 1; }

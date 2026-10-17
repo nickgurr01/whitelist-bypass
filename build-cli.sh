@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Go 1.27+ selects a headless-client HTTP/2 path that panics on the first
+# HTTPS request; pin the version docker-build uses, override via env
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.1}"
+
 # Builds the standalone headless creators, joiners and vk-bot for every supported
 # OS and CPU architecture and packages each target into one zip under prebuilts.
 # Binaries inside a zip keep their plain names, so a user unzips and runs

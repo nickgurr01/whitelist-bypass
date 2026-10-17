@@ -1,6 +1,10 @@
 #!/bin/sh
 set -e
 
+# Go 1.27+ selects a headless-client HTTP/2 path that panics on the first
+# HTTPS request; pin the version docker-build uses, override via env
+export GOTOOLCHAIN="${GOTOOLCHAIN:-go1.26.1}"
+
 export ANDROID_HOME="$HOME/Library/Android/sdk"
 export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
 export CGO_LDFLAGS="-Wl,-z,max-page-size=16384"
